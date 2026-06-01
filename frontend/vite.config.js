@@ -12,6 +12,11 @@ export default defineConfig({
       }
     }
   },
+  preview: {
+    port: 4173,
+    host: '0.0.0.0',
+    allowedHosts: ['amused-vision-production-a3d8.up.railway.app'],
+  },
   build: {
     outDir: 'dist',
   }

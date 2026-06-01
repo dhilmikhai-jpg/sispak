@@ -1,0 +1,163 @@
+================================================================
+DOKUMENTASI IMPLEMENTASI NLP (Natural Language Processing)
+Sistem Pakar Diagnosa Kerusakan Komputer - Kelompok 8
+Mata Kuliah: Sistem Pakar dan Bahasa Alamiah
+================================================================
+
+
+1. LATAR BELAKANG
+-----------------
+Sistem pakar ini dikembangkan dengan menambahkan fitur Chat berbasis NLP
+sebagai pelengkap fitur konsultasi checklist yang sudah ada. Tujuannya
+agar user bisa mendeskripsikan keluhan komputer mereka menggunakan bahasa
+natural sehari-hari tanpa harus memilih gejala satu per satu.
+
+
+2. PENDEKATAN
+-------------
+NLP yang digunakan bersifat Rule-Based (berbasis aturan), bukan library
+eksternal. Alasannya:
+
+  - Project berbasis Node.js, sedangkan library NLP Bahasa Indonesia
+    yang matang (seperti Sastrawi) tersedia di Python/PHP
+  - Domain sistem terbatas hanya 39 gejala hardware komputer,
+    sehingga rule-based sudah cukup efektif
+  - Proses dapat dijelaskan step-by-step secara akademik
+
+
+3. PIPELINE NLP
+---------------
+Input teks user diproses melalui 4 tahap berurutan:
+
+  [TAHAP 1] TEXT PREPROCESSING
+  - Case folding: semua teks diubah ke huruf kecil
+  - Normalisasi: kata slang/singkatan diubah ke bentuk baku
+      "gak" -> "tidak", "fan" -> "kipas", "hdd" -> "harddisk",
+      "matot" -> "mati total", "ngehang" -> "macet",
+      "rusak" -> "bermasalah", "freeze" -> "macet",
+      "kena air" -> "terkena air"
+  - Hapus tanda baca
+  - Tokenisasi: teks dipecah menjadi array kata
+  - Stopword removal: hapus kata tidak bermakna
+      ("yang", "dan", "di", "saya", "laptop", "komputer", dll.)
+
+  [TAHAP 2] NEGATION HANDLING
+  - Deteksi kata negasi SEBELUM stopword removal agar kata negasi
+    masih tersedia saat pengecekan
+  - Kata negasi yang dikenali:
+      "tidak", "bukan", "belum", "tanpa", "jangan",
+      "ga", "gak", "ngga", "nggak", "gk", "tak"
+  - Jangkauan negasi: 2 token setelah kata negasi ditandai sebagai
+    ternegasi dan diabaikan saat semantic matching
+  - Contoh:
+      "layar tidak blank tapi panas"
+       -> "blank" ternegasi -> diabaikan
+       -> "panas" tidak ternegasi -> diproses -> G08 terdeteksi
+
+  [TAHAP 3] STEMMING (Affix Stripping)
+  - Hapus sufiks: -kan, -an, -nya, -i, -lah, -kah
+  - Hapus prefiks: me-, di-, ke-, ter-, ber-, pe-, se-
+  - Sufiks dihapus lebih dulu, baru prefiks
+  - Hanya dihapus jika sisa kata masih >= 3 karakter
+
+  Contoh:
+    "dimatikan"  -> hapus -kan -> "dimati"  -> hapus di- -> "mati"
+    "berputar"   -> hapus ber- -> "putar"
+    "layarnya"   -> hapus -nya -> "layar"
+    "menyalakan" -> hapus -kan -> "menyala" -> hapus me- -> "nyala"
+
+  [TAHAP 4] SEMANTIC MATCHING
+  - Token hasil stemming dicocokkan ke kamus sinonim (synonyms.js)
+  - Setiap gejala G01-G39 memiliki daftar kata kunci dan variasinya
+  - Token yang ternegasi (dari Tahap 2) diabaikan saat pencocokan
+  - Pencocokan dilakukan 3 lapis:
+      1. Exact substring di teks positif (teks tanpa bagian negasi)
+      2. Exact token match setelah preprocessing
+      3. Partial match: minimal 60% token keyword harus cocok
+  - Output: array kode gejala yang terdeteksi
+
+  Contoh lengkap:
+    Input   : "laptop sering mati sendiri dan panas banget"
+    Setelah preprocessing : ["sering", "mati", "sendiri", "panas"]
+    Negasi terdeteksi     : tidak ada
+    Setelah stemming      : ["sering", "mati", "sendiri", "panas"]
+    Gejala terdeteksi     : G01 (mati sendiri), G07 (sering mati), G08 (panas)
+
+  Contoh dengan negasi:
+    Input   : "layar tidak blank tapi panas banget"
+    Setelah preprocessing : ["layar", "tidak", "blank", "panas"]
+    Negasi terdeteksi     : "blank" ternegasi (2 token setelah "tidak")
+    Token positif         : ["layar", "panas"]
+    Gejala terdeteksi     : G08 (panas) — G23/G27 tidak muncul karena "blank" ternegasi
+
+
+4. INTEGRASI DENGAN SISTEM PAKAR
+----------------------------------
+Output NLP berupa array kode gejala langsung masuk ke engine sistem pakar
+yang sudah ada, sama persis seperti input dari mode checklist.
+
+  Alur lengkap:
+
+  User ketik teks bebas di halaman Chat
+        |
+        v
+  [NLP Engine] -> ekstrak gejala -> ["G01", "G07", "G08"]
+        |
+        | Jika tidak ada gejala terdeteksi:
+        |   -> Bot balas dengan follow-up question
+        |   -> Tampilkan suggestion chips (contoh keluhan)
+        |   -> User bisa klik chip untuk isi input otomatis
+        v
+  [CF Engine]
+  - Hitung Certainty Factor tiap kerusakan berdasarkan gejala
+  - Rumus: CF = MB - MD, dikombinasi: CF_baru = CF_lama + CF_baru * (1 - CF_lama)
+  - Output: ranking kerusakan dari CF tertinggi
+        |
+        v
+  [CBR Engine] - siklus 4R:
+  - Retrieve : cari kasus paling mirip dari basis kasus (similarity >= 0.4)
+               menggunakan Weighted Hamming + Cosine Similarity
+  - Reuse    : ambil solusi dari kasus dengan similarity tertinggi
+  - Revise   : kombinasikan hasil CBR dan CF berdasarkan threshold:
+               sim >= 0.85 -> pakai CBR (CBR_dominant)
+               sim 0.5-0.85 -> bandingkan bobot CBR vs CF
+               sim < 0.5   -> pakai CF (CF_dominant)
+               tidak ada kasus -> CF_only
+  - Retain   : simpan kasus baru ke basis kasus (status: unverified)
+        |
+        v
+  Response ke frontend (Chat UI):
+  - Proses NLP ditampilkan (tokens, stemming, gejala terdeteksi)
+  - Nama kerusakan + kode
+  - Nilai CF (%) + interpretasi (Mungkin / Hampir Pasti / Pasti)
+  - Metode CBR yang digunakan + similarity (%)
+  - Semua kandidat kerusakan dengan CF masing-masing
+  - Langkah solusi perbaikan lengkap (semua langkah, bukan hanya 1)
+
+  Endpoint:
+    POST /api/diagnosis/chat          -> hanya ekstrak gejala dari teks
+    POST /api/diagnosis/chat/diagnose -> ekstrak gejala + diagnosis penuh
+
+
+5. HASIL PENGUJIAN
+-------------------
+  Input                                     | Gejala Terdeteksi
+  ------------------------------------------|------------------
+  "laptop mati total"                       | G02
+  "laptop kena air"                         | G06
+  "layar blank dan panas banget"            | G08, G23, G27
+  "laptop sering mati sendiri dan panas"    | G01, G07, G08
+  "layar hitam tapi kipas jalan"            | G04, G23, G27, G29
+  "blue screen terus"                       | G30
+  "harddisk tidak terdeteksi"               | G15
+  "printer tidak terdeteksi kertas nyangkut"| G34, G39
+  "bunyi bip terus saat dinyalakan"         | G31
+
+  Pengujian Negation Handling:
+  Input                                     | Hasil
+  ------------------------------------------|------------------
+  "layar tidak blank tapi panas banget"     | G08 saja (G23/G27 tidak muncul)
+  "laptop tidak mati sendiri tapi layar blank"| G23, G27 saja (G01/G07 tidak muncul)
+  "bukan blue screen tapi sering restart"   | G01 saja (G30 tidak muncul)
+  "laptop sering mati sendiri dan panas"    | G01, G07, G08 (normal, tanpa negasi)
+================================================================
